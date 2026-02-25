@@ -1,6 +1,7 @@
 const http = require("http");
 const express = require("express");
 const cors = require("cors");
+const errorHandler = require("../../mws/__error.mw");
 const app = express();
 
 module.exports = class AdminServer {
@@ -19,12 +20,10 @@ module.exports = class AdminServer {
     app.use(express.urlencoded({ extended: true }));
     app.use("/static", express.static("public"));
 
-    app.use((err, req, res, next) => {
-      console.error(err.stack);
-      res.status(500).send("Something broke!");
-    });
-
     app.all("/api/:moduleName/:fnName", this.adminApi.mw);
+
+    /** global error handler — must be registered after all routes */
+    app.use(errorHandler);
 
     let server = http.createServer(app);
     server.listen(this.config.dotEnv.ADMIN_PORT, () => {
