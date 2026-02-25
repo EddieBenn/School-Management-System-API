@@ -1,3 +1,5 @@
+const bcrypt = require("bcrypt");
+
 module.exports = class User {
   constructor({
     utils,
@@ -6,46 +8,95 @@ module.exports = class User {
     cortex,
     managers,
     validators,
-    mongomodels,
+    oyster,
   } = {}) {
     this.config = config;
     this.cortex = cortex;
     this.validators = validators;
-    this.mongomodels = mongomodels;
+    this.oyster = oyster;
     this.tokenManager = managers.token;
-    this.usersCollection = "users";
-    this.userExposed = ["createUser"];
-    this.adminExposed = ["createUser", "deleteUser", "get=getUsers"];
+    this.emailManager = managers.email;
+    this.managers = managers;
+
+    this.userExposed = ["createUser", "login", "get=getUser"];
+    this.adminExposed = ["createUser", "get=getUser"];
   }
 
-  async createUser({ username, email, password }) {
-    const user = { username, email, password };
+  async hash(password) {
+    const salt = await bcrypt.genSalt(10);
+    return bcrypt.hash(password, salt);
+  }
 
-    // Data validation
+  async checkPassword(password, hashedPassword) {
+    return bcrypt.compare(password, hashedPassword);
+  }
+
+  async createUser({ username, email, password, role, schoolId }) {
+    let user = { username, email, password, role, schoolId };
+
     let result = await this.validators.user.createUser(user);
     if (result) return result;
 
-    // Creation Logic
-    let createdUser = { username, email, password };
-    let longToken = this.tokenManager.genLongToken({
-      userId: createdUser._id,
-      userKey: createdUser.key,
+    // Check if user already exists
+    const emailSearch = await this.oyster.call("search_find", {
+      query: { fields: ["@email:" + email] },
+      label: "user",
     });
+    if (emailSearch && emailSearch.docs && emailSearch.docs.length > 0) {
+      return { error: "User with this email already exists" };
+    }
 
-    // Response
+    user.password = await this.hash(password);
+    user._label = "user";
+
+    // Add to Oyster DB
+    let createdUser = await this.oyster.call("add_block", user);
+    if (createdUser.error) return createdUser;
+
+    // Emit created event
+    this.emailManager.notifyUserCreated(createdUser);
+
+    delete createdUser.password;
+
     return {
       user: createdUser,
-      longToken,
     };
   }
 
-  async deleteUser({ userId }) {
-    // TODO: implement deletion logic
-    return { message: "User deleted successfully" };
+  async login({ email, password }) {
+    let result = await this.validators.user.login({ email, password });
+    if (result) return result;
+
+    // Search user by email
+    const emailSearch = await this.oyster.call("search_find", {
+      query: { fields: ["@email:" + email] },
+      label: "user",
+    });
+
+    if (!emailSearch || !emailSearch.docs || emailSearch.docs.length === 0) {
+      return { error: "Invalid email or password" };
+    }
+
+    const user = emailSearch.docs[0];
+    const isMatch = await this.checkPassword(password, user.password);
+
+    if (!isMatch) {
+      return { error: "Invalid email or password" };
+    }
+
+    // Generate long token
+    let longToken = this.tokenManager.genLongToken({
+      userId: user._id,
+      userKey: user._key || "default", // Oyster DB blocks lack _key usually
+    });
+
+    delete user.password;
+    return { user, longToken };
   }
 
-  async getUsers() {
-    // TODO: implement list logic
-    return { users: [] };
+  async getUser({ __longToken, __auth }) {
+    const user = __auth; // Got populated by our middleware
+    delete user.password;
+    return { user };
   }
 };
