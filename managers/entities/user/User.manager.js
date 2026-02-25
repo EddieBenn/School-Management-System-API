@@ -39,7 +39,7 @@ module.exports = class User {
 
     // Check if user already exists
     const emailSearch = await this.oyster.call("search_find", {
-      query: { fields: ["@email:" + email] },
+      query: { text: "@email:" + email.replace(/[@.]/g, "\\\\$&") },
       label: "user",
     });
     if (emailSearch && emailSearch.docs && emailSearch.docs.length > 0) {
@@ -69,7 +69,7 @@ module.exports = class User {
 
     // Search user by email
     const emailSearch = await this.oyster.call("search_find", {
-      query: { fields: ["@email:" + email] },
+      query: { text: "@email:" + email.replace(/[@.]/g, "\\\\$&") },
       label: "user",
     });
 
