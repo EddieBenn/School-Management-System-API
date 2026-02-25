@@ -42,3 +42,5 @@ const managersLoader = new ManagersLoader({config, cache, cortex, oyster, aeon})
 const managers = managersLoader.load();
 
 managers.userServer.run();
+managers.adminServer.run();
+
