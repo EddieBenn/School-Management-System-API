@@ -6,13 +6,15 @@ module.exports = class Classroom {
     cortex,
     managers,
     validators,
-    oyster,
+    mongomodels,
   } = {}) {
     this.config = config;
     this.cortex = cortex;
     this.validators = validators;
-    this.oyster = oyster;
+    this.classroomModel = mongomodels.classroom;
+    this.schoolModel = mongomodels.school;
     this.managers = managers;
+    this.cache = cache;
 
     // Exposed endpoints logic
     this.adminExposed = [
@@ -36,21 +38,26 @@ module.exports = class Classroom {
 
     const classroom = {
       name,
-      capacity: capacity.toString(),
+      capacity: Number(capacity),
       schoolId: actualSchoolId,
     };
-    let result = await this.validators.classroom.createClassroom(classroom);
+    let result = await this.validators.classroom.createClassroom({
+      ...classroom,
+      capacity: capacity.toString(), // Validator expects string based on schema
+    });
     if (result) return result;
 
     if (!actualSchoolId)
       return { error: "School ID required to create a classroom" };
 
     // Verify school exists
-    let school = await this.oyster.call("get_block", actualSchoolId);
-    if (school.error) return { error: "School not found" };
+    let school = await this.schoolModel.findById(actualSchoolId);
+    if (!school) return { error: "School not found" };
 
-    classroom._label = "classroom";
-    let createdClassroom = await this.oyster.call("add_block", classroom);
+    let createdClassroom = await this.classroomModel.create(classroom);
+
+    // Invalidate classroom cache for this school
+    await this.cache.set(`classrooms:${actualSchoolId}`, null);
 
     return createdClassroom;
   }
@@ -64,27 +71,38 @@ module.exports = class Classroom {
   }) {
     let user = __schooladmin;
 
-    let existing = await this.oyster.call("get_block", classroomId);
-    if (existing.error || existing._label !== "classroom") {
+    let existing = await this.classroomModel.findById(classroomId);
+    if (!existing) {
       return { error: "Classroom not found" };
     }
 
-    if (user.role !== "superadmin" && existing.schoolId !== user.schoolId) {
+    if (
+      user.role !== "superadmin" &&
+      existing.schoolId.toString() !== user.schoolId.toString()
+    ) {
       return { error: "Access denied to this classroom" };
     }
 
-    const classroomUpdate = { classroomId };
+    const classroomUpdate = {};
     if (name) classroomUpdate.name = name;
-    if (capacity) classroomUpdate.capacity = capacity.toString();
+    if (capacity) classroomUpdate.capacity = Number(capacity);
 
-    let result =
-      await this.validators.classroom.updateClassroom(classroomUpdate);
+    let result = await this.validators.classroom.updateClassroom({
+      classroomId,
+      ...classroomUpdate,
+      ...(capacity && { capacity: capacity.toString() }),
+    });
     if (result) return result;
 
-    let updatedClassroom = await this.oyster.call("update_block", {
-      _id: classroomId,
-      ...classroomUpdate,
-    });
+    let updatedClassroom = await this.classroomModel.findByIdAndUpdate(
+      classroomId,
+      classroomUpdate,
+      { new: true },
+    );
+
+    // Invalidate classroom cache for this school
+    await this.cache.set(`classrooms:${existing.schoolId}`, null);
+
     return updatedClassroom;
   }
 
@@ -94,35 +112,53 @@ module.exports = class Classroom {
       user.role === "superadmin" && schoolId ? schoolId : user.schoolId;
 
     if (!querySchoolId) {
-      const result = await this.oyster.call("search_find", {
-        query: { text: "*" },
-        label: "classroom",
-      });
-      return { classrooms: result.docs || [] };
+      const classrooms = await this.classroomModel.find({});
+      return { classrooms };
     }
 
-    const result = await this.oyster.call("search_find", {
-      query: { fields: ["@schoolId:" + querySchoolId] },
-      label: "classroom",
+    // Try to get from cache
+    const cachedClassrooms = await this.cache.get(
+      `classrooms:${querySchoolId}`,
+    );
+    if (cachedClassrooms) {
+      return { classrooms: JSON.parse(cachedClassrooms), cached: true };
+    }
+
+    const classrooms = await this.classroomModel.find({
+      schoolId: querySchoolId,
     });
 
-    return { classrooms: result.docs || [] };
+    // Store in cache for 5 minutes
+    await this.cache.set(
+      `classrooms:${querySchoolId}`,
+      JSON.stringify(classrooms),
+      { ttl: 300 },
+    );
+
+    return { classrooms };
   }
 
   async deleteClassroom({ classroomId, __longToken, __schooladmin }) {
     if (!classroomId) return { error: "classroomId is required" };
 
     let user = __schooladmin;
-    let existing = await this.oyster.call("get_block", classroomId);
-    if (existing.error || existing._label !== "classroom") {
+    let existing = await this.classroomModel.findById(classroomId);
+    if (!existing) {
       return { error: "Classroom not found" };
     }
 
-    if (user.role !== "superadmin" && existing.schoolId !== user.schoolId) {
+    if (
+      user.role !== "superadmin" &&
+      existing.schoolId.toString() !== user.schoolId.toString()
+    ) {
       return { error: "Access denied to this classroom" };
     }
 
-    let res = await this.oyster.call("delete_block", classroomId);
-    return { success: res.ok };
+    let res = await this.classroomModel.findByIdAndDelete(classroomId);
+
+    // Invalidate classroom cache for this school
+    await this.cache.set(`classrooms:${existing.schoolId}`, null);
+
+    return { success: !!res };
   }
 };
