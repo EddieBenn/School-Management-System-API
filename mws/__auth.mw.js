@@ -1,4 +1,4 @@
-module.exports = ({ meta, config, managers }) => {
+module.exports = ({ meta, config, managers, mongomodels, cache }) => {
   return async ({ req, res, next, results }) => {
     if (!results.__longToken) {
       return managers.responseDispatcher.dispatch(res, {
@@ -8,12 +8,26 @@ module.exports = ({ meta, config, managers }) => {
       });
     }
 
-    // Fetch user from db
-    let user = await managers.oyster.call(
-      "get_block",
-      results.__longToken.userId,
-    );
-    if (!user || user.error) {
+    const userId = results.__longToken.userId;
+
+    // Try to get from cache first
+    let user = await cache.get(`user:session:${userId}`);
+    if (user) {
+      user = JSON.parse(user);
+    } else {
+      // Fetch user from mongodb
+      user = await mongomodels.user.findById(userId);
+      if (user) {
+        user = user.toObject();
+        delete user.password;
+        // Cache for 1 hour
+        await cache.set(`user:session:${userId}`, JSON.stringify(user), {
+          ttl: 3600,
+        });
+      }
+    }
+
+    if (!user) {
       return managers.responseDispatcher.dispatch(res, {
         ok: false,
         code: 401,

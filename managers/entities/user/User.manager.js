@@ -8,15 +8,16 @@ module.exports = class User {
     cortex,
     managers,
     validators,
-    oyster,
+    mongomodels,
   } = {}) {
     this.config = config;
     this.cortex = cortex;
     this.validators = validators;
-    this.oyster = oyster;
+    this.userModel = mongomodels.user;
     this.tokenManager = managers.token;
     this.emailManager = managers.email;
     this.managers = managers;
+    this.cache = cache;
 
     this.userExposed = ["createUser", "login", "get=getUser"];
     this.adminExposed = ["createUser", "get=getUser"];
@@ -38,28 +39,24 @@ module.exports = class User {
     if (result) return result;
 
     // Check if user already exists
-    const emailSearch = await this.oyster.call("search_find", {
-      query: { text: "@email:" + email.replace(/[@.]/g, "\\\\$&") },
-      label: "user",
-    });
-    if (emailSearch && emailSearch.docs && emailSearch.docs.length > 0) {
+    const existingUser = await this.userModel.findOne({ email });
+    if (existingUser) {
       return { error: "User with this email already exists" };
     }
 
     user.password = await this.hash(password);
-    user._label = "user";
 
-    // Add to Oyster DB
-    let createdUser = await this.oyster.call("add_block", user);
-    if (createdUser.error) return createdUser;
+    // Save to MongoDB
+    let createdUser = await this.userModel.create(user);
 
     // Emit created event
     this.emailManager.notifyUserCreated(createdUser);
 
-    delete createdUser.password;
+    const userObj = createdUser.toObject();
+    delete userObj.password;
 
     return {
-      user: createdUser,
+      user: userObj,
     };
   }
 
@@ -67,31 +64,37 @@ module.exports = class User {
     let result = await this.validators.user.login({ email, password });
     if (result) return result;
 
-    // Search user by email
-    const emailSearch = await this.oyster.call("search_find", {
-      query: { text: "@email:" + email.replace(/[@.]/g, "\\\\$&") },
-      label: "user",
-    });
+    // Try to get from cache first (optional, but requested)
+    // const cachedUser = await this.cache.get(`user:${email}`);
+    // if (cachedUser) { ... }
 
-    if (!emailSearch || !emailSearch.docs || emailSearch.docs.length === 0) {
-      return { error: "Invalid email or password" };
+    const user = await this.userModel.findOne({ email });
+
+    if (!user) {
+      return { error: "Invalid email" };
     }
 
-    const user = emailSearch.docs[0];
     const isMatch = await this.checkPassword(password, user.password);
 
     if (!isMatch) {
-      return { error: "Invalid email or password" };
+      return { error: "Invalid password" };
     }
 
     // Generate long token
     let longToken = this.tokenManager.genLongToken({
       userId: user._id,
-      userKey: user._key || "default", // Oyster DB blocks lack _key usually
+      userKey: "default",
     });
 
-    delete user.password;
-    return { user, longToken };
+    const userObj = user.toObject();
+    delete userObj.password;
+
+    // Cache user session data in Redis
+    await this.cache.set(`user:session:${user._id}`, JSON.stringify(userObj), {
+      ttl: 3600,
+    });
+
+    return { user: userObj, longToken };
   }
 
   async getUser({ __longToken, __auth }) {

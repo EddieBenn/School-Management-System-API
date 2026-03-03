@@ -6,13 +6,14 @@ module.exports = class School {
     cortex,
     managers,
     validators,
-    oyster,
+    mongomodels,
   } = {}) {
     this.config = config;
     this.cortex = cortex;
     this.validators = validators;
-    this.oyster = oyster;
+    this.schoolModel = mongomodels.school;
     this.managers = managers;
+    this.cache = cache;
 
     // Using __superadmin middleware ensures only superadmin can hit these
     this.adminExposed = [
@@ -28,9 +29,11 @@ module.exports = class School {
     let result = await this.validators.school.createSchool(school);
     if (result) return result;
 
-    school._label = "school";
+    let createdSchool = await this.schoolModel.create(school);
 
-    let createdSchool = await this.oyster.call("add_block", school);
+    // Invalidate schools cache
+    await this.cache.set("schools:all", null);
+
     return createdSchool;
   }
 
@@ -39,33 +42,45 @@ module.exports = class School {
     let result = await this.validators.school.updateSchool(school);
     if (result) return result;
 
-    let existing = await this.oyster.call("get_block", schoolId);
-    if (existing.error || existing._label !== "school") {
+    let updatedSchool = await this.schoolModel.findByIdAndUpdate(
+      schoolId,
+      { name, address },
+      { new: true },
+    );
+
+    if (!updatedSchool) {
       return { error: "School not found" };
     }
 
-    let updatedSchool = await this.oyster.call("update_block", {
-      _id: schoolId,
-      name,
-      address,
-    });
+    // Invalidate schools cache
+    await this.cache.set("schools:all", null);
+
     return updatedSchool;
   }
 
   async getSchools({ __longToken, __superadmin }) {
-    // Find all blocks with label 'school'
-    const result = await this.oyster.call("search_find", {
-      query: { text: "*" },
-      label: "school",
-    });
-    return { schools: result.docs || [] };
+    // Try to get from cache
+    const cachedSchools = await this.cache.get("schools:all");
+    if (cachedSchools) {
+      return { schools: JSON.parse(cachedSchools), cached: true };
+    }
+
+    const schools = await this.schoolModel.find({});
+
+    // Store in cache for 5 minutes
+    await this.cache.set("schools:all", JSON.stringify(schools), { ttl: 300 });
+
+    return { schools };
   }
 
   async deleteSchool({ schoolId, __longToken, __superadmin }) {
     if (!schoolId) return { error: "schoolId is required" };
 
-    // Optionally check if exists first
-    let res = await this.oyster.call("delete_block", schoolId);
-    return { success: res.ok };
+    let res = await this.schoolModel.findByIdAndDelete(schoolId);
+
+    // Invalidate schools cache
+    await this.cache.set("schools:all", null);
+
+    return { success: !!res };
   }
 };
